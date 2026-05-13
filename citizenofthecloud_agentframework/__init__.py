@@ -32,6 +32,7 @@ from citizenofthecloud_agentframework.tools import (
     verify_cloud_agent,
     lookup_cloud_agent,
     check_agent_trust,
+    register_cloud_agent,
     cloud_identity_tools,
 )
 from citizenofthecloud_agentframework.middleware import (
@@ -45,6 +46,7 @@ __all__ = [
     "verify_cloud_agent",
     "lookup_cloud_agent",
     "check_agent_trust",
+    "register_cloud_agent",
     "cloud_identity_tools",
     "CloudIdentityMiddleware",
     "CloudIdentityFnMiddleware",

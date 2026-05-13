@@ -6,7 +6,7 @@ annotations as tools. These functions are passed directly to
 Agent(tools=[...]) and are called automatically by the agent.
 """
 
-from typing import Annotated, List, Callable
+from typing import Annotated, List, Callable, Optional
 from pydantic import Field
 
 from citizenofthecloud import verify_agent
@@ -174,3 +174,54 @@ def cloud_identity_tools() -> List[Callable]:
         )
     """
     return [verify_cloud_agent, lookup_cloud_agent, check_agent_trust]
+
+
+# ═══════════════════════════════════════════════════════════
+# REGISTER AGENT (SDK token auth)
+# ═══════════════════════════════════════════════════════════
+
+def register_cloud_agent(
+    sdk_token: str,
+    name: str,
+    declared_purpose: str,
+    autonomy_level: str = "tool",
+    capabilities: Optional[list] = None,
+    operational_domain: Optional[str] = None,
+    registry_url: str = REGISTRY_URL,
+) -> dict:
+    """
+    Register a new Cloud Identity agent in a single call.
+
+    Generates a fresh Ed25519 keypair locally, posts the public key plus
+    metadata to the registry under the supplied SDK token, and returns a
+    dict with cloud_id, public_key, and private_key. The private key never
+    leaves this process — store it securely. The returned cloud_id +
+    private_key are the inputs to CloudIdentity for signing subsequent
+    requests.
+
+    This is NOT a function-tool intended for an agent to call mid-task —
+    it's an operator-facing helper for bootstrap / setup scripts.
+
+    Args:
+        sdk_token: A cotc_sdk_* token from citizenofthecloud.com/account
+        name: Human-readable name for the agent
+        declared_purpose: What the agent does (<= 500 chars)
+        autonomy_level: 'tool' | 'assistant' | 'agent' | 'self-directing'
+        capabilities: Optional list of capability strings
+        operational_domain: Optional domain string
+        registry_url: Override the registry URL
+
+    Returns:
+        dict with keys: cloud_id, public_key, private_key, name,
+        declared_purpose, autonomy_level, passport.
+    """
+    from citizenofthecloud import register_agent
+    return register_agent(
+        sdk_token=sdk_token,
+        name=name,
+        declared_purpose=declared_purpose,
+        autonomy_level=autonomy_level,
+        capabilities=capabilities,
+        operational_domain=operational_domain,
+        registry_url=registry_url,
+    )
