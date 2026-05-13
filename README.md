@@ -6,18 +6,42 @@ Microsoft Agent Framework is the successor to AutoGen and Semantic Kernel, mergi
 
 ## Install
 
+This package is currently distributed directly from GitHub. The PyPI release is not yet caught up with the latest features (most recently: `register_cloud_agent()` and SDK-token auth). For now, install from GitHub:
+
 ```bash
-# Clone (early access — not yet on PyPI)
 git clone https://github.com/citizenofthecloud/agent-framework.git
 pip install -e ./agent-framework
-
-# Once published:
-# pip install citizenofthecloud-agentframework
 ```
 
-Requires the [Citizen of the Cloud Python SDK](https://github.com/citizenofthecloud/sdk-python).
+Or as a git dependency in `requirements.txt`:
+
+```
+citizenofthecloud-agentframework @ git+https://github.com/citizenofthecloud/agent-framework.git@main
+```
+
+`pip` will also pull the [Citizen of the Cloud Python SDK](https://github.com/citizenofthecloud/sdk-python) — install that one from GitHub the same way for now (the published PyPI version is also behind).
 
 ## Quick Start
+
+### 0. Register a New Agent (One-Time Setup)
+
+If you don't already have an agent, `register_cloud_agent()` creates one in a single call. Generates a fresh Ed25519 keypair locally, registers the public key under your SDK token, and returns the `cloud_id` + private key. Get a token from [citizenofthecloud.com/account](https://citizenofthecloud.com/account).
+
+```python
+from citizenofthecloud_agentframework import register_cloud_agent
+
+result = register_cloud_agent(
+    sdk_token="cotc_sdk_…",          # from /account
+    name="My Research Bot",
+    declared_purpose="Summarize papers and surface trends",
+    autonomy_level="tool",
+)
+
+print(result["cloud_id"])
+print(result["private_key"])   # STORE SECURELY — the server keeps only the public key
+```
+
+`register_cloud_agent()` is an operator-facing setup helper, not an agent-callable function tool — registration is bootstrap, not runtime. The returned `cloud_id` + `private_key` are the inputs to `CloudIdentityMiddleware` for signing subsequent requests.
 
 ### 1. Add Identity Tools to an Agent
 
@@ -152,6 +176,12 @@ response = client.post(
 
 ## Tools Reference
 
+### register_cloud_agent()
+
+Operator-facing setup helper. Generates a fresh Ed25519 keypair locally, posts the public key to `/api/register` under your SDK token, and returns a dict with `cloud_id`, `public_key`, and `private_key`. The private key never leaves the caller's process. Not a function tool — call it from bootstrap scripts, not from an agent loop.
+
+**When to use:** Bootstrap a new agent from code. Requires a `cotc_sdk_*` token from [/account](https://citizenofthecloud.com/account).
+
 ### verify_cloud_agent
 
 Full cryptographic verification of an agent's identity from request headers. Checks Ed25519 signature, timestamp freshness, registry status, and trust score.
@@ -184,6 +214,7 @@ Intercepts function/tool calls to log when identity tools are used and track ver
 |---|---|
 | `CLOUD_ID` | Your agent's Cloud ID (e.g., `cc-7f3a9b2e-...`) |
 | `CLOUD_PRIVATE_KEY` | Your agent's Ed25519 private key (PEM format) |
+| `COTC_SDK_TOKEN` | Bootstrap SDK token (`cotc_sdk_*`) used by `register_cloud_agent()`. Obtain from [citizenofthecloud.com/account](https://citizenofthecloud.com/account). |
 
 ## Links
 
