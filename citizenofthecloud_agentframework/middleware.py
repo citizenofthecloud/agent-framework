@@ -16,7 +16,7 @@ import os
 import logging
 from typing import Optional, Dict, Any, Callable, Awaitable
 
-from agent_framework import AgentMiddleware, AgentRunContext
+from agent_framework import AgentMiddleware, AgentContext as AgentRunContext
 from agent_framework import FunctionMiddleware, FunctionInvocationContext
 from citizenofthecloud import CloudIdentity, verify_agent
 

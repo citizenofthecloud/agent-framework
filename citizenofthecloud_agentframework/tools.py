@@ -3,183 +3,263 @@ Function tools for Citizen of the Cloud identity verification.
 
 Microsoft Agent Framework uses plain Python functions with type
 annotations as tools. These functions are passed directly to
-Agent(tools=[...]) and are called automatically by the agent.
+Agent(tools=[...]) and called automatically by the agent.
+
+Full 17 agent-callable tools — see __init__.py for the structural
+primitives (middleware / route guard / observability) that complete
+the 20-item framework target.
 """
 
-from typing import Annotated, List, Callable, Optional
+from typing import Annotated, Optional, List, Callable
 from pydantic import Field
 
-from citizenofthecloud import verify_agent
+from citizenofthecloud import (
+    verify_agent,
+    verify_request,
+    generate_key_pair,
+    cloud_fetch,
+    request_challenge,
+    submit_challenge_response,
+    lookup_agent,
+    list_directory,
+    get_governance_feed,
+    register_agent,
+    CloudIdentity,
+)
 
 REGISTRY_URL = "https://citizenofthecloud.com"
 
 
-# ═══════════════════════════════════════════════════════════
-# VERIFY AGENT TOOL
-# ═══════════════════════════════════════════════════════════
+def _fmt_agent(agent: dict) -> str:
+    caps = ", ".join(agent.get("capabilities") or []) or "None listed"
+    return (
+        f"Agent: {agent.get('name', 'Unknown')}\n"
+        f"Cloud ID: {agent.get('cloud_id', 'Unknown')}\n"
+        f"Purpose: {agent.get('declared_purpose', 'Not declared')}\n"
+        f"Autonomy: {agent.get('autonomy_level', 'Unknown')}\n"
+        f"Trust Score: {agent.get('trust_score', 'N/A')}\n"
+        f"Capabilities: {caps}\n"
+        f"Covenant Signed: {agent.get('covenant_signed', False)}\n"
+        f"Status: {agent.get('status', 'Unknown')}"
+    )
 
-def verify_cloud_agent(
-    cloud_id: Annotated[str, Field(description="The Cloud ID from the X-Cloud-ID header")],
-    timestamp: Annotated[str, Field(description="The timestamp from the X-Cloud-Timestamp header")],
-    signature: Annotated[str, Field(description="The signature from the X-Cloud-Signature header")],
+
+# 1. lookup-agent
+def lookup_cloud_agent(
+    cloud_id: Annotated[str, Field(description="The Cloud ID of the agent to look up")],
+    registry_url: str = REGISTRY_URL,
 ) -> str:
-    """
-    Verify an AI agent's identity using the Citizen of the Cloud protocol.
+    """Look up an AI agent's public profile in the Citizen of the Cloud registry."""
+    agent = lookup_agent(registry_url, cloud_id)
+    if not agent:
+        return f"Agent not found or inactive: {cloud_id}"
+    return _fmt_agent(agent)
 
-    Use this when you receive a request from another agent and need to
-    confirm they are who they claim to be. Requires the three X-Cloud-*
-    header values from the incoming request. Returns the agent's name,
-    trust score, autonomy level, and verification status.
-    """
+
+# 2. get-server-identity
+def get_server_identity(
+    cloud_id: Annotated[str, Field(description="This agent's Cloud ID")],
+    private_key: Annotated[str, Field(description="This agent's PEM-encoded Ed25519 private key")],
+    registry_url: str = REGISTRY_URL,
+) -> str:
+    """Fetch this agent's own passport from the registry."""
+    identity = CloudIdentity(cloud_id=cloud_id, private_key=private_key, registry_url=registry_url)
+    passport = identity.get_passport()
+    if not passport:
+        return f"No passport found for {cloud_id}"
+    return _fmt_agent(passport)
+
+
+# 3. list-directory
+def list_cloud_directory(
+    limit: Annotated[int, Field(description="Max entries to summarize", default=20)] = 20,
+    registry_url: str = REGISTRY_URL,
+) -> str:
+    """List public entries in the Citizen of the Cloud agent directory."""
+    agents = list_directory(registry_url)
+    if not agents:
+        return "Directory is empty."
+    lines = [f"{len(agents)} agent(s) (showing up to {limit}):"]
+    for a in agents[:limit]:
+        lines.append(
+            f"  - {a.get('name','?')} ({a.get('cloud_id','?')}) "
+            f"trust={a.get('trust_score','?')} status={a.get('status','?')}"
+        )
+    return "\n".join(lines)
+
+
+# 4. governance-feed
+def governance_feed(
+    limit: Annotated[int, Field(description="Max events to summarize", default=20)] = 20,
+    registry_url: str = REGISTRY_URL,
+) -> str:
+    """Read the Citizen of the Cloud governance activity feed."""
+    feed = get_governance_feed(registry_url)
+    if not feed:
+        return "Governance feed is empty."
+    lines = [f"{len(feed)} event(s) (showing up to {limit}):"]
+    for ev in feed[:limit]:
+        lines.append(
+            f"  - {ev.get('event_type', ev.get('type','?'))} "
+            f"at {ev.get('created_at', ev.get('timestamp','?'))}"
+        )
+    return "\n".join(lines)
+
+
+# 5. verify-agent
+def verify_cloud_agent(
+    cloud_id: Annotated[str, Field(description="X-Cloud-ID header")],
+    timestamp: Annotated[str, Field(description="X-Cloud-Timestamp header")],
+    signature: Annotated[str, Field(description="X-Cloud-Signature header")],
+    registry_url: str = REGISTRY_URL,
+) -> str:
+    """Verify an AI agent's identity using the Citizen of the Cloud protocol."""
+    headers = {"X-Cloud-ID": cloud_id, "X-Cloud-Timestamp": timestamp, "X-Cloud-Signature": signature}
+    result = verify_agent(headers, registry_url=registry_url)
+    if result.get("verified"):
+        return f"VERIFIED — {_fmt_agent(result['agent'])}"
+    return f"NOT VERIFIED — Reason: {result.get('reason')}"
+
+
+# 6. verify-request
+def verify_cloud_request(
+    cloud_id: Annotated[str, Field(description="X-Cloud-ID header")],
+    timestamp: Annotated[str, Field(description="X-Cloud-Timestamp header")],
+    signature: Annotated[str, Field(description="X-Cloud-Signature header")],
+    url: Annotated[str, Field(description="The exact request URL the signature is bound to")],
+    method: Annotated[str, Field(description="HTTP method")],
+    body: Annotated[str, Field(description="Request body", default="")] = "",
+    registry_url: str = REGISTRY_URL,
+) -> str:
+    """Verify a request-bound Cloud Identity signature (covers URL, method, body)."""
+    from citizenofthecloud import TrustPolicy
     headers = {
         "X-Cloud-ID": cloud_id,
         "X-Cloud-Timestamp": timestamp,
         "X-Cloud-Signature": signature,
+        "X-Cloud-Request-Bound": "true",
     }
-
-    try:
-        result = verify_agent(headers)
-    except Exception as e:
-        return f"Verification error: {str(e)}"
-
-    if result["verified"]:
-        agent = result["agent"]
-        return (
-            f"VERIFIED — Agent: {agent['name']}, "
-            f"Cloud ID: {agent['cloud_id']}, "
-            f"Trust Score: {agent['trust_score']}, "
-            f"Autonomy: {agent['autonomy_level']}, "
-            f"Covenant Signed: {agent.get('covenant_signed', False)}, "
-            f"Status: {agent['status']}"
-        )
-    else:
-        return f"NOT VERIFIED — Reason: {result['reason']}"
+    policy = TrustPolicy(registry_url=registry_url)
+    result = verify_request(headers, url=url, method=method, body=body, policy=policy)
+    if result.get("verified"):
+        return f"VERIFIED (request-bound) — {_fmt_agent(result['agent'])}"
+    return f"NOT VERIFIED — Reason: {result.get('reason')}"
 
 
-# ═══════════════════════════════════════════════════════════
-# LOOKUP AGENT TOOL
-# ═══════════════════════════════════════════════════════════
-
-def lookup_cloud_agent(
-    cloud_id: Annotated[str, Field(description="The Cloud ID of the agent to look up")],
+# 7. request-challenge
+def request_cloud_challenge(
+    cloud_id: Annotated[str, Field(description="The Cloud ID requesting a challenge")],
+    registry_url: str = REGISTRY_URL,
 ) -> str:
-    """
-    Look up an AI agent's public profile in the Citizen of the Cloud registry.
+    """Request a verification challenge nonce for a Cloud ID."""
+    ch = request_challenge(registry_url, cloud_id)
+    return f"nonce={ch['nonce']} expires_in={ch.get('expires_in','?')}s"
 
-    Use this to learn about an agent before deciding whether to interact
-    with or delegate work to them. Returns name, purpose, trust score,
-    autonomy level, capabilities, and status. This is an informational
-    lookup, not a cryptographic verification.
-    """
-    import requests
 
-    try:
-        resp = requests.get(
-            f"{REGISTRY_URL}/api/verify",
-            params={"cloud_id": cloud_id},
-            timeout=10,
-        )
-        data = resp.json()
-    except Exception as e:
-        return f"Lookup error: {str(e)}"
+# 8. respond-to-challenge
+def respond_to_cloud_challenge(
+    cloud_id: Annotated[str, Field(description="The Cloud ID being verified")],
+    nonce: Annotated[str, Field(description="The hex nonce from request_cloud_challenge")],
+    signature: Annotated[str, Field(description="Base64 signature over the UTF-8 nonce bytes")],
+    registry_url: str = REGISTRY_URL,
+) -> str:
+    """Submit a signed challenge response."""
+    result = submit_challenge_response(registry_url, cloud_id, nonce, signature)
+    if result.get("verified"):
+        return f"VERIFIED via challenge — {_fmt_agent(result['agent'])}"
+    return f"NOT VERIFIED — Reason: {result.get('error') or result.get('reason')}"
 
-    if not data.get("verified"):
-        return f"Agent not found or inactive: {cloud_id}"
 
-    agent = data.get("agent", {})
-    capabilities = ", ".join(agent.get("capabilities", []))
+# 9. sign-challenge
+def sign_cloud_challenge(
+    nonce: Annotated[str, Field(description="The hex nonce from request_cloud_challenge")],
+    private_key: Annotated[str, Field(description="PEM-encoded Ed25519 private key")],
+) -> str:
+    """Sign a challenge nonce locally with the agent's Ed25519 private key."""
+    import base64
+    from cryptography.hazmat.primitives import serialization
+    key = serialization.load_pem_private_key(private_key.encode("utf-8"), password=None)
+    sig = key.sign(nonce.encode("utf-8"))
+    return base64.b64encode(sig).decode("ascii")
 
+
+# 10. prove-identity
+def prove_cloud_identity(
+    cloud_id: Annotated[str, Field(description="The agent's Cloud ID")],
+    private_key: Annotated[str, Field(description="PEM-encoded Ed25519 private key")],
+    registry_url: str = REGISTRY_URL,
+) -> str:
+    """Prove this agent's identity via the full challenge/sign/respond loop."""
+    identity = CloudIdentity(cloud_id=cloud_id, private_key=private_key, registry_url=registry_url)
+    result = identity.prove_identity()
+    if result.get("verified"):
+        return f"VERIFIED — {_fmt_agent(result['agent'])}"
+    return f"NOT VERIFIED — Reason: {result.get('error') or result.get('reason')}"
+
+
+# 11. sign-headers
+def sign_cloud_headers(
+    cloud_id: Annotated[str, Field(description="The agent's Cloud ID")],
+    private_key: Annotated[str, Field(description="PEM-encoded Ed25519 private key")],
+) -> str:
+    """Produce signed X-Cloud-* headers for an outbound request."""
+    identity = CloudIdentity(cloud_id=cloud_id, private_key=private_key)
+    h = identity.sign()
     return (
-        f"Agent: {agent.get('name', 'Unknown')}\n"
-        f"Cloud ID: {agent.get('cloud_id', cloud_id)}\n"
-        f"Purpose: {agent.get('declared_purpose', 'Not declared')}\n"
-        f"Autonomy Level: {agent.get('autonomy_level', 'Unknown')}\n"
-        f"Trust Score: {agent.get('trust_score', 'N/A')}\n"
-        f"Capabilities: {capabilities or 'None listed'}\n"
-        f"Covenant Signed: {agent.get('covenant_signed', False)}\n"
-        f"Status: {agent.get('status', 'Unknown')}\n"
-        f"Registered: {agent.get('registered_at', 'Unknown')}"
+        f"X-Cloud-ID: {h['X-Cloud-ID']}\n"
+        f"X-Cloud-Timestamp: {h['X-Cloud-Timestamp']}\n"
+        f"X-Cloud-Signature: {h['X-Cloud-Signature']}"
     )
 
 
-# ═══════════════════════════════════════════════════════════
-# CHECK TRUST TOOL
-# ═══════════════════════════════════════════════════════════
-
-def check_agent_trust(
-    cloud_id: Annotated[str, Field(description="The Cloud ID of the agent to check")],
-    minimum_trust_score: Annotated[
-        float, Field(description="Minimum trust score required (0.0 to 1.0)", default=0.5)
-    ] = 0.5,
+# 12. sign-request
+def sign_cloud_request(
+    cloud_id: Annotated[str, Field(description="The agent's Cloud ID")],
+    private_key: Annotated[str, Field(description="PEM-encoded Ed25519 private key")],
+    url: Annotated[str, Field(description="Target request URL")],
+    method: Annotated[str, Field(description="HTTP method")],
+    body: Annotated[str, Field(description="Request body", default="")] = "",
 ) -> str:
-    """
-    Check if an AI agent meets a minimum trust score threshold.
-
-    Use this for a quick pass/fail decision before delegating tasks
-    or sharing data with another agent. Provide the Cloud ID and the
-    minimum trust score required (default 0.5). Returns PASS or FAIL
-    with the agent's current trust score.
-    """
-    import requests
-
-    try:
-        resp = requests.get(
-            f"{REGISTRY_URL}/api/verify",
-            params={"cloud_id": cloud_id},
-            timeout=10,
-        )
-        data = resp.json()
-    except Exception as e:
-        return f"FAIL — Could not reach registry: {str(e)}"
-
-    if not data.get("verified"):
-        return f"FAIL — Agent not found or inactive: {cloud_id}"
-
-    agent = data.get("agent", {})
-    trust_score = agent.get("trust_score", 0)
-    name = agent.get("name", "Unknown")
-
-    if trust_score >= minimum_trust_score:
-        return (
-            f"PASS — {name} has trust score {trust_score} "
-            f"(threshold: {minimum_trust_score})"
-        )
-    else:
-        return (
-            f"FAIL — {name} has trust score {trust_score} "
-            f"(below threshold: {minimum_trust_score})"
-        )
+    """Produce request-bound X-Cloud-* headers (covers URL, method, body hash)."""
+    identity = CloudIdentity(cloud_id=cloud_id, private_key=private_key)
+    h = identity.sign_request(url, method, body)
+    return (
+        f"X-Cloud-ID: {h['X-Cloud-ID']}\n"
+        f"X-Cloud-Timestamp: {h['X-Cloud-Timestamp']}\n"
+        f"X-Cloud-Signature: {h['X-Cloud-Signature']}\n"
+        f"X-Cloud-Request-Bound: true"
+    )
 
 
-# ═══════════════════════════════════════════════════════════
-# CONVENIENCE: GET ALL TOOLS
-# ═══════════════════════════════════════════════════════════
-
-def cloud_identity_tools() -> List[Callable]:
-    """
-    Return all three Cloud Identity tools as a list.
-
-    Pass directly to Agent(tools=...) to give an agent full
-    identity verification capabilities.
-
-    Usage:
-        from agent_framework.openai import OpenAIChatClient
-        from agent_framework import Agent
-        from citizenofthecloud_agentframework import cloud_identity_tools
-
-        agent = Agent(
-            chat_client=OpenAIChatClient(),
-            instructions="Verify agents before interacting.",
-            tools=cloud_identity_tools(),
-        )
-    """
-    return [verify_cloud_agent, lookup_cloud_agent, check_agent_trust]
+# 13. cloud-fetch
+def cloud_fetch_tool(
+    cloud_id: Annotated[str, Field(description="The caller's Cloud ID")],
+    private_key: Annotated[str, Field(description="PEM-encoded Ed25519 private key")],
+    url: Annotated[str, Field(description="Target URL")],
+    method: Annotated[str, Field(description="HTTP method", default="GET")] = "GET",
+    body: Annotated[Optional[str], Field(description="Request body", default=None)] = None,
+) -> str:
+    """Make an HTTP request with automatic Cloud Identity signing."""
+    identity = CloudIdentity(cloud_id=cloud_id, private_key=private_key)
+    resp = cloud_fetch(identity, url, method=method, body=body)
+    body_str = resp.get("body")
+    if isinstance(body_str, (dict, list)):
+        import json
+        body_str = json.dumps(body_str)
+    return f"status={resp['status']}\nbody={body_str}"
 
 
-# ═══════════════════════════════════════════════════════════
-# REGISTER AGENT (SDK token auth)
-# ═══════════════════════════════════════════════════════════
+# 14. generate-keypair
+def generate_cloud_keypair() -> str:
+    """Generate a fresh Ed25519 keypair locally."""
+    keys = generate_key_pair()
+    return (
+        f"public_key:\n{keys['public_key']}\n"
+        f"private_key (STORE SECURELY):\n{keys['private_key']}"
+    )
 
+
+# 15. register-agent
 def register_cloud_agent(
     sdk_token: str,
     name: str,
@@ -189,33 +269,7 @@ def register_cloud_agent(
     operational_domain: Optional[str] = None,
     registry_url: str = REGISTRY_URL,
 ) -> dict:
-    """
-    Register a new Cloud Identity agent in a single call.
-
-    Generates a fresh Ed25519 keypair locally, posts the public key plus
-    metadata to the registry under the supplied SDK token, and returns a
-    dict with cloud_id, public_key, and private_key. The private key never
-    leaves this process — store it securely. The returned cloud_id +
-    private_key are the inputs to CloudIdentity for signing subsequent
-    requests.
-
-    This is NOT a function-tool intended for an agent to call mid-task —
-    it's an operator-facing helper for bootstrap / setup scripts.
-
-    Args:
-        sdk_token: A cotc_sdk_* token from citizenofthecloud.com/account
-        name: Human-readable name for the agent
-        declared_purpose: What the agent does (<= 500 chars)
-        autonomy_level: 'tool' | 'assistant' | 'agent' | 'self-directing'
-        capabilities: Optional list of capability strings
-        operational_domain: Optional domain string
-        registry_url: Override the registry URL
-
-    Returns:
-        dict with keys: cloud_id, public_key, private_key, name,
-        declared_purpose, autonomy_level, passport.
-    """
-    from citizenofthecloud import register_agent
+    """Register a new Cloud Identity agent (SDK-token auth). Bootstrap helper."""
     return register_agent(
         sdk_token=sdk_token,
         name=name,
@@ -225,3 +279,77 @@ def register_cloud_agent(
         operational_domain=operational_domain,
         registry_url=registry_url,
     )
+
+
+# 16. report-agent
+def report_cloud_agent(
+    sdk_token: Annotated[str, Field(description="cotc_sdk_* with 'manage' scope, or user JWT")],
+    cloud_id: Annotated[str, Field(description="Cloud ID of the agent being reported")],
+    report_type: Annotated[str, Field(description="impersonation | malicious_behavior | spam | covenant_violation | inaccurate_registration")],
+    evidence: Annotated[str, Field(description="Evidence text (20–2000 chars)")],
+    registry_url: str = REGISTRY_URL,
+) -> str:
+    """File a governance report against another agent."""
+    import json
+    import urllib.request
+    import urllib.error
+    body = json.dumps({"cloud_id": cloud_id, "report_type": report_type, "evidence": evidence}).encode("utf-8")
+    req = urllib.request.Request(
+        f"{registry_url.rstrip('/')}/api/report",
+        data=body,
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {sdk_token}"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        return f"Report filed: id={data.get('report_id') or data.get('id') or 'ok'}"
+    except urllib.error.HTTPError as e:
+        try:
+            err = json.loads(e.read().decode("utf-8"))
+            return f"Report error ({e.code}): {err.get('error', str(e))}"
+        except Exception:
+            return f"Report error: HTTP {e.code}"
+    except urllib.error.URLError as e:
+        return f"Report error: registry unreachable: {e}"
+
+
+# 17. check-trust
+def check_agent_trust(
+    cloud_id: Annotated[str, Field(description="The Cloud ID of the agent to check")],
+    minimum_trust_score: Annotated[float, Field(description="Minimum trust score required", default=0.5)] = 0.5,
+    registry_url: str = REGISTRY_URL,
+) -> str:
+    """Check if an AI agent meets a minimum trust score threshold."""
+    agent = lookup_agent(registry_url, cloud_id)
+    if not agent:
+        return f"FAIL — Agent not found or inactive: {cloud_id}"
+    score = agent.get("trust_score", 0) or 0
+    name = agent.get("name", "Unknown")
+    if score >= minimum_trust_score:
+        return f"PASS — {name} trust={score} (threshold={minimum_trust_score})"
+    return f"FAIL — {name} trust={score} (below threshold={minimum_trust_score})"
+
+
+# Convenience — all 17 agent-callable function tools
+def cloud_identity_tools() -> List[Callable]:
+    """Return all 17 agent-callable function tools in one list."""
+    return [
+        lookup_cloud_agent,
+        get_server_identity,
+        list_cloud_directory,
+        governance_feed,
+        verify_cloud_agent,
+        verify_cloud_request,
+        request_cloud_challenge,
+        respond_to_cloud_challenge,
+        sign_cloud_challenge,
+        prove_cloud_identity,
+        sign_cloud_headers,
+        sign_cloud_request,
+        cloud_fetch_tool,
+        generate_cloud_keypair,
+        register_cloud_agent,
+        report_cloud_agent,
+        check_agent_trust,
+    ]
