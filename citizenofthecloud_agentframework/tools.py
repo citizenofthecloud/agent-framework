@@ -27,7 +27,10 @@ from citizenofthecloud import (
     CloudIdentity,
 )
 
-REGISTRY_URL = "https://citizenofthecloud.com"
+# Canonical host is www. The bare apex 307-redirects here, and HTTP
+# clients strip the Authorization header on cross-host redirects — so
+# callers using the bare apex silently fail register_agent with a 401.
+REGISTRY_URL = "https://www.citizenofthecloud.com"
 
 
 def _fmt_agent(agent: dict) -> str:
